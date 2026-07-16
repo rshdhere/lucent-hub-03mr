@@ -1,38 +1,83 @@
 const http = require("http");
+const { createMessage, listMessages } = require("./store");
+const { addClient, broadcast } = require("./sse");
+const { chatPage } = require("./html");
 
 const port = Number(process.env.PORT || 3000);
 
-const server = http.createServer((req, res) => {
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => {
+      chunks.push(chunk);
+      if (Buffer.concat(chunks).length > 64 * 1024) {
+        reject(new Error("Payload too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, status, data) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://127.0.0.1");
-  if (url.pathname === "/health") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
+  const path = url.pathname;
+
+  if (path === "/health") {
+    sendJson(res, 200, { ok: true });
     return;
   }
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Ember Works</title>
-  <style>
-    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f4f6f8; color: #111; }
-    main { width: min(28rem, 92vw); }
-    h1 { font-size: 1.35rem; margin: 0 0 0.5rem; }
-    p { margin: 0; color: #444; line-height: 1.45; }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Ember Works</h1>
-    <p>Scaffold is running. Implement the full app (UI + API), then keep <code>GET /</code> user-facing.</p>
-  </main>
-</body>
-</html>`);
+
+  if (path === "/" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(chatPage());
+    return;
+  }
+
+  if (path === "/api/messages" && req.method === "GET") {
+    const limit = url.searchParams.get("limit");
+    sendJson(res, 200, { messages: listMessages(limit) });
+    return;
+  }
+
+  if (path === "/api/messages" && req.method === "POST") {
+    try {
+      const raw = await readBody(req);
+      const body = raw ? JSON.parse(raw) : {};
+      const message = createMessage(body.username, body.text);
+      if (!message) {
+        sendJson(res, 400, { error: "Message text is required" });
+        return;
+      }
+      broadcast("message", message);
+      sendJson(res, 201, { message });
+    } catch (err) {
+      const status = err.message === "Payload too large" ? 413 : 400;
+      sendJson(res, status, { error: err.message || "Invalid request" });
+    }
+    return;
+  }
+
+  if (path === "/api/events" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    res.write(": connected\n\n");
+    addClient(res);
+    return;
+  }
+
+  sendJson(res, 404, { error: "Not found" });
 });
 
 server.listen(port, "0.0.0.0", () => {
-  console.log("listening on :" + port);
+  console.log("Lucent Hub chat listening on :" + port);
 });
